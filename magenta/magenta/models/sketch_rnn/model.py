@@ -80,6 +80,7 @@ class Model(object):
        reuse: a boolean that when true, attemps to reuse variables.
     """
     self.hps = hps
+    tf.logging.info("Halo!")
     with tf.variable_scope('vector_rnn', reuse=reuse):
       if not gpu_mode:
         with tf.device('/cpu:0'):
@@ -105,6 +106,9 @@ class Model(object):
     last_h_fw = self.enc_cell_fw.get_output(last_state_fw)
     last_h_bw = self.enc_cell_bw.get_output(last_state_bw)
     last_h = tf.concat([last_h_fw, last_h_bw], 1)
+    #[pma]: saving last h:
+    self.h = last_h
+
     mu = rnn.super_linear(
         last_h,
         self.hps.z_size,
