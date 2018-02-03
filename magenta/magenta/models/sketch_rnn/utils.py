@@ -201,6 +201,7 @@ class DataLoader(object):
 
   def __init__(self,
                strokes,
+               classes=None,
                batch_size=100,
                max_seq_length=250,
                scale_factor=1.0,
@@ -219,6 +220,7 @@ class DataLoader(object):
     # sets self.strokes (list of ndarrays, one per sketch, in stroke-3 format,
     # sorted by size)
     self.preprocess(strokes)
+    self.classes = classes
 
   def preprocess(self, strokes):
     """Remove entries from strokes having > max_seq_length points."""
@@ -297,11 +299,23 @@ class DataLoader(object):
     seq_len = np.array(seq_len, dtype=int)
     # We return three things: stroke-3 format, stroke-5 format, list of seq_len.
     return x_batch, self.pad_batch(x_batch, self.max_seq_length), seq_len
+  
+  def _get_classes_from_indices(self, indices):
+    res = []
+    for idx in range(len(indices)):
+      i = indices[idx]
+      data_copy = np.copy(self.classes[idx])
+      res.append(data_copy)
+    return np.array(res, dtype=int)
 
   def random_batch(self):
     """Return a randomised portion of the training data."""
     idx = np.random.permutation(range(0, len(self.strokes)))[0:self.batch_size]
     return self._get_batch_from_indices(idx)
+  
+  def random_batch_with_classes(self):
+    idx = np.random.permutation(range(0, len(self.strokes)))[0:self.batch_size]
+    return self._get_batch_from_indices(idx), self._get_classes_from_indices(idx)
 
   def get_batch(self, idx):
     """Get the idx'th batch from the dataset."""
@@ -310,6 +324,12 @@ class DataLoader(object):
     start_idx = idx * self.batch_size
     indices = range(start_idx, start_idx + self.batch_size)
     return self._get_batch_from_indices(indices)
+  
+  def get_classes_batch(self, idx):
+    assert self.classes is not None
+    start_idx = idx * self.batch_size
+    indices = range(start_idx, start_idx + self.batch_size)
+    return self._get_classes_from_indices(indices)
 
   def pad_batch(self, batch, max_len):
     """Pad the batch to be stroke-5 bigger format as described in paper."""

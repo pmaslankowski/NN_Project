@@ -63,7 +63,8 @@ def get_default_hparams():
       random_scale_factor=0.15,  # Random scaling data augmention proportion.
       augment_stroke_prob=0.10,  # Point dropping augmentation proportion.
       conditional=True,  # When False, use unconditional decoder-only model.
-      is_training=True  # Is model training? Recommend keeping true.
+      is_training=True,  # Is model training? Recommend keeping true.
+      num_of_classes=0  # number of classes. If equals to 0, then we don't use classes input
   )
   return hparams
 
@@ -193,6 +194,7 @@ class Model(object):
           cell, output_keep_prob=self.hps.output_dropout_prob)
     self.cell = cell
 
+    # [pma]: tf.placeholder is an input to the network (?)
     self.sequence_lengths = tf.placeholder(
         dtype=tf.int32, shape=[self.hps.batch_size])
     self.input_data = tf.placeholder(
@@ -203,6 +205,8 @@ class Model(object):
     self.output_x = self.input_data[:, 1:self.hps.max_seq_len + 1, :]
     # vectors of strokes to be fed to decoder (same as above, but lagged behind
     # one step to include initial dummy value of (0, 0, 1, 0, 0))
+
+    #[pma]: probably here we inject the input data to the network
     self.input_x = self.input_data[:, :self.hps.max_seq_len, :]
 
     # either do vae-bit and get z, or do unconditional, decoder-only
@@ -247,6 +251,15 @@ class Model(object):
     with tf.variable_scope('RNN'):
       output_w = tf.get_variable('output_w', [self.hps.dec_rnn_size, n_out])
       output_b = tf.get_variable('output_b', [n_out])
+
+    if(self.hps.num_of_classes > 0):
+      self.classes = tf.placeholder(
+          dtype=tf.int32,
+          shape=[self.hps.batch_size])
+      embedded_classes_pre_tile = tf.expand_dims(tf.one_hot(self.classes, self.hps.num_of_classes), 1)
+      embedded_classes = tf.tile(embedded_classes_pre_tile, [1, self.hps.max_seq_len, 1])
+      actual_input_x = tf.concat([actual_input_x, embedded_classes], 2)
+
 
     # decoder module of sketch-rnn is below
     output, last_state = tf.nn.dynamic_rnn(

@@ -113,7 +113,7 @@ def download_pretrained_models(
   tf.logging.info('Unzipping complete.')
 
 
-def load_dataset(data_dir, model_params, inference_mode=False):
+def load_dataset(data_dir, model_params, inference_mode=False, include_classes=False):
   """Loads the .npz file, and splits the set into train/valid/test."""
 
   # normalizes the x and y columns usint the training set.
@@ -140,6 +140,7 @@ def load_dataset(data_dir, model_params, inference_mode=False):
         data = np.load(data_filepath, encoding='latin1')
       else:
         data = np.load(data_filepath)
+
     tf.logging.info('Loaded {}/{}/{} from {}'.format(
         len(data['train']), len(data['valid']), len(data['test']),
         dataset))
@@ -218,14 +219,139 @@ def load_dataset(data_dir, model_params, inference_mode=False):
   return result
 
 
+
+def load_extended_dataset(data_dir, model_params, inference_mode=False):
+  """Loads the .npz file, and splits the set into train/valid/test."""
+
+  # normalizes the x and y columns usint the training set.
+  # applies same scaling factor to valid and test set.
+
+  datasets = []
+  if isinstance(model_params.data_set, list):
+    datasets = model_params.data_set
+  else:
+    datasets = [model_params.data_set]
+
+  train_strokes = None
+  valid_strokes = None
+  test_strokes = None
+
+  for dataset in datasets:
+    data_filepath = os.path.join(data_dir, dataset)
+    if data_dir.startswith('http://') or data_dir.startswith('https://'):
+      tf.logging.info('Downloading %s', data_filepath)
+      response = requests.get(data_filepath)
+      data = np.load(StringIO(response.content))
+    else:
+      if six.PY3:
+        data = np.load(data_filepath, encoding='latin1')
+      else:
+        data = np.load(data_filepath)
+        classes_filepath = os.path.join(data_dir, dataset[:-4] + '_classes.npz')
+        classes = np.load(classes_filepath)
+        tf.logging.info('Loaded classes data from: {}'.format(classes_filepath))
+
+    tf.logging.info('Loaded {}/{}/{} from {}'.format(
+        len(data['train']), len(data['valid']), len(data['test']),
+        dataset))
+    if train_strokes is None:
+      train_strokes = data['train']
+      valid_strokes = data['valid']
+      test_strokes = data['test']
+      train_classes = classes['train']
+      valid_classes = classes['valid']
+      test_classes = classes['test']
+    else:
+      train_strokes = np.concatenate((train_strokes, data['train']))
+      valid_strokes = np.concatenate((valid_strokes, data['valid']))
+      test_strokes = np.concatenate((test_strokes, data['test']))
+      train_classes = np.concatenate((train_classes, classes['train']))
+      valid_classes = np.concatenate((valid_classes, classes['valid']))
+      test_classes = np.concatenate((test_classes, classes['test']))
+
+  all_strokes = np.concatenate((train_strokes, valid_strokes, test_strokes))
+  num_points = 0
+  for stroke in all_strokes:
+    num_points += len(stroke)
+  avg_len = num_points / len(all_strokes)
+  tf.logging.info('Dataset combined: {} ({}/{}/{}), avg len {}'.format(
+      len(all_strokes), len(train_strokes), len(valid_strokes),
+      len(test_strokes), int(avg_len)))
+
+  # calculate the max strokes we need.
+  max_seq_len = utils.get_max_len(all_strokes)
+  # overwrite the hps with this calculation.
+  model_params.max_seq_len = max_seq_len
+
+  tf.logging.info('model_params.max_seq_len %i.', model_params.max_seq_len)
+
+  eval_model_params = sketch_rnn_model.copy_hparams(model_params)
+
+  eval_model_params.use_input_dropout = 0
+  eval_model_params.use_recurrent_dropout = 0
+  eval_model_params.use_output_dropout = 0
+  eval_model_params.is_training = 1
+
+  if inference_mode:
+    eval_model_params.batch_size = 1
+    eval_model_params.is_training = 0
+
+  sample_model_params = sketch_rnn_model.copy_hparams(eval_model_params)
+  sample_model_params.batch_size = 1  # only sample one at a time
+  sample_model_params.max_seq_len = 1  # sample one point at a time
+
+  train_set = utils.DataLoader(
+      train_strokes,
+      train_classes,
+      model_params.batch_size,
+      max_seq_length=model_params.max_seq_len,
+      random_scale_factor=model_params.random_scale_factor,
+      augment_stroke_prob=model_params.augment_stroke_prob)
+
+  normalizing_scale_factor = train_set.calculate_normalizing_scale_factor()
+  train_set.normalize(normalizing_scale_factor)
+
+  valid_set = utils.DataLoader(
+      valid_strokes,
+      valid_classes,
+      eval_model_params.batch_size,
+      max_seq_length=eval_model_params.max_seq_len,
+      random_scale_factor=0.0,
+      augment_stroke_prob=0.0)
+  valid_set.normalize(normalizing_scale_factor)
+
+  test_set = utils.DataLoader(
+      test_strokes,
+      valid_classes,
+      eval_model_params.batch_size,
+      max_seq_length=eval_model_params.max_seq_len,
+      random_scale_factor=0.0,
+      augment_stroke_prob=0.0)
+  test_set.normalize(normalizing_scale_factor)
+
+  tf.logging.info('normalizing_scale_factor %4.4f.', normalizing_scale_factor)
+
+  result = [
+      train_set, valid_set, test_set, model_params, eval_model_params,
+      sample_model_params
+  ]
+  return result
+
+
+
 def evaluate_model(sess, model, data_set):
   """Returns the average weighted cost, reconstruction cost and KL cost."""
   total_cost = 0.0
   total_r_cost = 0.0
   total_kl_cost = 0.0
   for batch in range(data_set.num_batches):
-    unused_orig_x, x, s = data_set.get_batch(batch)
-    feed = {model.input_data: x, model.sequence_lengths: s}
+    if model.hps.num_of_classes > 0:
+      unused_orig_x, x, s = data_set.get_batch(batch)
+      classes = data_set.get_classes_batch(batch)
+      feed = {model.input_data: x, model.sequence_lengths: s, model.classes: classes}
+    else:
+      unused_orig_x, x, s = data_set.get_batch(batch)
+      feed = {model.input_data: x, model.sequence_lengths: s}
     (cost, r_cost,
      kl_cost) = sess.run([model.cost, model.r_cost, model.kl_cost], feed)
     total_cost += cost
@@ -282,7 +408,6 @@ def train(sess, model, eval_model, train_set, valid_set, test_set):
   start = time.time()
 
   for _ in range(hps.num_steps):
-
     step = sess.run(model.global_step)
 
     curr_learning_rate = ((hps.learning_rate - hps.min_learning_rate) *
@@ -290,13 +415,23 @@ def train(sess, model, eval_model, train_set, valid_set, test_set):
     curr_kl_weight = (hps.kl_weight - (hps.kl_weight - hps.kl_weight_start) *
                       (hps.kl_decay_rate)**step)
 
-    _, x, s = train_set.random_batch()
-    feed = {
+    if hps.num_of_classes > 0:
+      (_, x, s), classes = train_set.random_batch_with_classes()
+      feed = {
+        model.input_data: x,
+        model.classes: classes,
+        model.sequence_lengths: s,
+        model.lr: curr_learning_rate,
+        model.kl_weight: curr_kl_weight
+      }
+    else:
+      _, x, s = train_set.random_batch()
+      feed = {
         model.input_data: x,
         model.sequence_lengths: s,
         model.lr: curr_learning_rate,
         model.kl_weight: curr_kl_weight
-    }
+      } 
 
     (train_cost, r_cost, kl_cost, _, train_step, _) = sess.run([
         model.cost, model.r_cost, model.kl_cost, model.final_state,
@@ -438,7 +573,10 @@ def trainer(model_params):
   for key, val in six.iteritems(model_params.values()):
     tf.logging.info('%s = %s', key, str(val))
   tf.logging.info('Loading data files.')
-  datasets = load_dataset(FLAGS.data_dir, model_params)
+  if model_params.num_of_classes > 0:
+    datasets = load_extended_dataset(FLAGS.data_dir, model_params)
+  else:
+    datasets = load_dataset(FLAGS.data_dir, model_params)
 
   train_set = datasets[0]
   valid_set = datasets[1]
